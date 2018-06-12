@@ -1,0 +1,52 @@
+What's TCMU and QEMU-TCMU?
+-------------------------
+
+TCMU is the abbreviation of TCM in Userspace and TCM is another
+name for LIO, an ISCSI target in Linux kernel. TCM can serve
+file, block device, RAM, etc as storage backend for ISCSI target
+totally in kernel. But for userspace storage like Glusterfs and 
+Ceph, it's hard for TCM to handle as backend storage. TCMU is used
+in this situation by utilizing UIO ring buffer to passthrough
+userspace so a userspace program can process SCSI command by handling
+TCMU protocol. QEMU-TCMU is such userspace program which can export
+any format/protocol that QEMU supports as ISCSI target or loopback
+by linking to libtcmu in tcmu-runner(a userspace helper daemon to
+handle TCMU interfaces).
+
+How to use QEMU-TCMU?
+--------------------
+
+Currently QEMU-TCMU depends on libtcmu/tcmu-runner to handle TCMU
+userspace interfaces and targetcli to manage ISCSI targets.
+
+1. create backend storage file
+
+   # qemu-img create test.file 1G
+
+2. start tcmu-runner
+
+   # systemctl start tcmu-runner
+
+3. start qemu-tcmu
+
+   # qemu-tcmu test.file
+
+4. configure ISCSI target by targetcli
+
+   # IQN=iqn.2016-11.org.test:qemu-tcmu-test
+   # targetcli /backstores/user:qemu create qemulun 1G @drive
+   # targetcli /iscsi create $IQN
+   # targetcli /iscsi/$IQN/tpg1 set attribute \
+                             authentication=0 \
+                             generate_node_acls=1 \
+                             demo_mode_write_protect=0 \
+                             prod_mode_write_protect=0
+   # targetcli /iscsi/$IQN/tpg1/luns create /backstores/user:qemu/qemulun
+   # targetcli ls
+
+Others
+------
+
+More infomation about TCMU and tcmu-runner please refer to
+Documentation/target/tcmu-design.txt in Linux kernel and
+https://github.com/open-iscsi/tcmu-runner.
