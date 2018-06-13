@@ -21,7 +21,7 @@
 
 #include "qemu/osdep.h"
 #include "libtcmu.h"
-#include "libtcmu_priv.h"
+#include "libtcmu_scsi.h"
 #include "qapi/qmp/qerror.h"
 #include "qemu/error-report.h"
 #include "sysemu/block-backend.h"
@@ -168,6 +168,7 @@ static void qemu_tcmu_dev_event_handler(void *opaque)
     struct tcmulib_cmd *cmd;
     struct tcmu_device *dev = exp->tcmu_dev;
 
+    trace_qemu_tcmu_dev_event_handler();
     tcmulib_processing_start(dev);
 
     while ((cmd = tcmulib_get_next_command(dev)) != NULL) {
@@ -389,7 +390,7 @@ static int qemu_tcmu_added(struct tcmu_device *dev)
         return -1;
     }
     exp->tcmu_dev = dev;
-    dev->hm_private = (void *)exp;
+    tcmu_set_dev_private(dev, exp);
     aio_set_fd_handler(blk_get_aio_context(exp->blk),
                        tcmu_get_dev_fd(dev),
                        true, qemu_tcmu_dev_event_handler,
@@ -399,7 +400,7 @@ static int qemu_tcmu_added(struct tcmu_device *dev)
 /* TODO: should stop exporting or disconnect dev and export? */
 static void qemu_tcmu_removed(struct tcmu_device *dev)
 {
-    TCMUExport *exp = (TCMUExport *)dev->hm_private;
+    TCMUExport *exp = tcmu_get_dev_private(dev);
 
     aio_set_fd_handler(blk_get_aio_context(exp->blk),
                        tcmu_get_dev_fd(dev),
@@ -417,6 +418,11 @@ static void qemu_tcmu_master_read(void *opaque)
     trace_qemu_tcmu_master_read();
     tcmulib_master_fd_ready(s->tcmulib_ctx);
 }
+
+static struct tcmulib_backstore_handler rhandler = {
+    .name = "Qemu handler",
+    .subtype = "qemu",
+};
 
 static struct tcmulib_handler qemu_tcmu_handler = {
     .name = "Handler for QEMU block devices",
@@ -534,6 +540,7 @@ void qemu_tcmu_start(const char *subtype, Error **errp)
     assert(!qemu_tcmu_handler.subtype);
     qemu_tcmu_handler.subtype = g_strdup(subtype);
     handler_state = g_new0(TCMUHandlerState, 1);
+    qemu_tcmu_handler.hm_private = &rhandler;
     handler_state->tcmulib_ctx = tcmulib_initialize(&qemu_tcmu_handler, 1);
 
     if (!handler_state->tcmulib_ctx) {
