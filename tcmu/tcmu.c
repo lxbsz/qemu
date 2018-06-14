@@ -90,14 +90,16 @@ static inline TCMURequest *qemu_tcmu_req_new(TCMUExport *exp,
     return req;
 }
 
-static int qemu_tcmu_handle_cmd(TCMUExport *exp, struct tcmulib_cmd *cmd)
+static int qemu_tcmu_handle_cmd(struct tcmu_device *dev, struct tcmulib_cmd *cmd)
 {
-
     uint8_t *cdb = cmd->cdb;
     /* TODO: block size? */
     uint64_t offset = tcmu_get_lba(cdb) << BDRV_SECTOR_BITS;
     QEMUIOVector *qiov;
+    TCMUExport *exp = tcmu_get_dev_private(dev);
 
+    printf("lxb----------0x%x------------\n", cdb[0]);
+    tcmu_print_cdb_info(dev, cmd, NULL);
     trace_qemu_tcmu_handle_cmd(cdb[0]);
     switch (cdb[0]) {
     case INQUIRY:
@@ -159,26 +161,6 @@ static int qemu_tcmu_handle_cmd(TCMUExport *exp, struct tcmulib_cmd *cmd)
         trace_qemu_tcmu_handle_cmd_unknown_cmd(cdb[0]);
         return TCMU_STS_NOT_HANDLED;
     }
-}
-
-
-static void qemu_tcmu_dev_event_handler(void *opaque)
-{
-    TCMUExport *exp = opaque;
-    struct tcmulib_cmd *cmd;
-    struct tcmu_device *dev = exp->tcmu_dev;
-
-    trace_qemu_tcmu_dev_event_handler();
-    tcmulib_processing_start(dev);
-
-    while ((cmd = tcmulib_get_next_command(dev)) != NULL) {
-        int ret = qemu_tcmu_handle_cmd(exp, cmd);
-        if (ret != TCMU_STS_ASYNC_HANDLED) {
-            tcmulib_command_complete(dev, cmd, ret);
-        }
-    }
-
-    tcmulib_processing_complete(dev);
 }
 
 static TCMUExport *qemu_tcmu_lookup(const BlockBackend *blk)
@@ -379,7 +361,15 @@ static bool qemu_tcmu_check_config(const char *cfgstr, char **reason)
     return true;
 }
 
-static int qemu_tcmu_added(struct tcmu_device *dev)
+static void qemu_tcmu_master_read(void *opaque)
+{
+    TCMUHandlerState *s = opaque;
+
+    trace_qemu_tcmu_master_read();
+    tcmulib_master_fd_ready(s->tcmulib_ctx);
+}
+
+static int qemu_tcmu_open(struct tcmu_device *dev, bool reopen)
 {
     TCMUExport *exp;
     const char *cfgstr = tcmu_get_dev_cfgstring(dev);
@@ -391,45 +381,31 @@ static int qemu_tcmu_added(struct tcmu_device *dev)
     }
     exp->tcmu_dev = dev;
     tcmu_set_dev_private(dev, exp);
-    aio_set_fd_handler(blk_get_aio_context(exp->blk),
-                       tcmu_get_dev_fd(dev),
-                       true, qemu_tcmu_dev_event_handler,
-                       NULL, NULL, exp);
+
     return 0;
 }
-/* TODO: should stop exporting or disconnect dev and export? */
-static void qemu_tcmu_removed(struct tcmu_device *dev)
+
+static void qemu_tcmu_close(struct tcmu_device *dev)
 {
     TCMUExport *exp = tcmu_get_dev_private(dev);
 
-    aio_set_fd_handler(blk_get_aio_context(exp->blk),
-                       tcmu_get_dev_fd(dev),
-                       false, NULL,
-                       NULL, NULL, NULL);
     blk_unref(exp->blk);
     QLIST_REMOVE(exp, next);
     g_free(exp);
 }
 
-static void qemu_tcmu_master_read(void *opaque)
-{
-    TCMUHandlerState *s = opaque;
-
-    trace_qemu_tcmu_master_read();
-    tcmulib_master_fd_ready(s->tcmulib_ctx);
-}
-
 static struct tcmulib_backstore_handler rhandler = {
     .name = "Qemu handler",
     .subtype = "qemu",
+    .open = qemu_tcmu_open,
+    .close = qemu_tcmu_close,
 };
 
 static struct tcmulib_handler qemu_tcmu_handler = {
     .name = "Handler for QEMU block devices",
     .subtype = NULL, /* Dynamically generated when starting. */
     .cfg_desc = "Format: device=<name>",
-    .added = qemu_tcmu_added,
-    .removed = qemu_tcmu_removed,
+    .handle_cmds = qemu_tcmu_handle_cmd,
     .check_config = qemu_tcmu_check_config,
 };
 
@@ -531,12 +507,18 @@ fail:
 void qemu_tcmu_start(const char *subtype, Error **errp)
 {
     int fd;
+    int ret;
 
     trace_qemu_tcmu_start();
     if (handler_state) {
         error_setg(errp, "TCMU handler already started");
         return;
     }
+
+    ret = tcmulib_register_backstore_handler(&rhandler);
+    if (ret)
+        return;
+
     assert(!qemu_tcmu_handler.subtype);
     qemu_tcmu_handler.subtype = g_strdup(subtype);
     handler_state = g_new0(TCMUHandlerState, 1);
